@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Customer Data Viewer</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        label {
+            font-weight: bold;
+            color: #555;
+        }
+        input, select, button {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .pagination {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin: 20px 0;
+            align-items: center;
+        }
+        .pagination button {
+            padding: 8px 15px;
+        }
+        .pagination-info {
+            font-weight: bold;
+            color: #666;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f8f9fa;
+            font-weight: bold;
+            color: #333;
+        }
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+        .error {
+            color: #dc3545;
+            text-align: center;
+            padding: 20px;
+        }
+        .stats {
+            background-color: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .stats h3 {
+            margin-top: 0;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Customer Data Viewer</h1>
+        
+        <div class="stats">
+            <h3>📈 Quick Stats</h3>
+            <div id="stats">Loading statistics...</div>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <label for="search">Search:</label>
+                <input type="text" id="search" placeholder="Name or email...">
+            </div>
+            <div class="control-group">
+                <label for="city">City:</label>
+                <input type="text" id="city" placeholder="Filter by city...">
+            </div>
+            <div class="control-group">
+                <label for="gender">Gender:</label>
+                <select id="gender">
+                    <option value="">All</option>
+                    <option value="M">Male</option>
+                    <option value="F">Female</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label for="perPage">Per Page:</label>
+                <select id="perPage">
+                    <option value="10">10</option>
+                    <option value="20" selected>20</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>&nbsp;</label>
+                <button onclick="loadCustomers()">🔍 Search</button>
+            </div>
+        </div>
+
+        <div class="pagination">
+            <button onclick="previousPage()" id="prevBtn">← Previous</button>
+            <span class="pagination-info" id="pageInfo">Page 1 of 1</span>
+            <button onclick="nextPage()" id="nextBtn">Next →</button>
+        </div>
+
+        <div id="loading" class="loading" style="display: none;">Loading customers...</div>
+        <div id="error" class="error" style="display: none;"></div>
+        
+        <table id="customersTable" style="display: none;">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Age</th>
+                    <th>Gender</th>
+                    <th>City</th>
+                    <th>State</th>
+                    <th>Country</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody id="customersBody">
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        let currentPage = 1;
+        let totalPages = 1;
+        let totalCustomers = 0;
+
+        // Load page on startup
+        window.onload = function() {
+            loadStats();
+            loadCustomers();
+        };
+
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats/overview');
+                const data = await response.json();
+                
+                document.getElementById('stats').innerHTML = `
+                    <strong>Total Customers:</strong> ${data.total_customers.toLocaleString()} | 
+                    <strong>Total Orders:</strong> ${data.total_orders.toLocaleString()} | 
+                    <strong>Avg Items/Order:</strong> ${data.average_items_per_order}
+                `;
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+
+        async function loadCustomers() {
+            const search = document.getElementById('search').value;
+            const city = document.getElementById('city').value;
+            const gender = document.getElementById('gender').value;
+            const perPage = document.getElementById('perPage').value;
+
+            // Show loading
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('customersTable').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+
+            try {
+                // Build query parameters
+                const params = new URLSearchParams({
+                    page: currentPage,
+                    per_page: perPage
+                });
+                
+                if (search) params.append('search', search);
+                if (city) params.append('city', city);
+                if (gender) params.append('gender', gender);
+
+                const response = await fetch(`/api/customers?${params}`);
+                const data = await response.json();
+
+                if (response.ok) {
+                    displayCustomers(data.customers, data.pagination);
+                } else {
+                    throw new Error(data.error || 'Failed to load customers');
+                }
+            } catch (error) {
+                document.getElementById('error').textContent = `Error: ${error.message}`;
+                document.getElementById('error').style.display = 'block';
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+
+        function displayCustomers(customers, pagination) {
+            const tbody = document.getElementById('customersBody');
+            tbody.innerHTML = '';
+
+            customers.forEach(customer => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${customer.id}</td>
+                    <td>${customer.first_name} ${customer.last_name}</td>
+                    <td>${customer.email}</td>
+                    <td>${customer.age || '-'}</td>
+                    <td>${customer.gender || '-'}</td>
+                    <td>${customer.city || '-'}</td>
+                    <td>${customer.state || '-'}</td>
+                    <td>${customer.country || '-'}</td>
+                    <td>${customer.created_at ? new Date(customer.created_at).toLocaleDateString() : '-'}</td>
+                `;
+                tbody.appendChild(row);
+            });
+
+            // Update pagination info
+            currentPage = pagination.page;
+            totalPages = pagination.pages;
+            totalCustomers = pagination.total;
+
+            document.getElementById('pageInfo').textContent = 
+                `Page ${currentPage} of ${totalPages} (${totalCustomers.toLocaleString()} total customers)`;
+
+            // Update pagination buttons
+            document.getElementById('prevBtn').disabled = currentPage <= 1;
+            document.getElementById('nextBtn').disabled = currentPage >= totalPages;
+
+            // Show table
+            document.getElementById('customersTable').style.display = 'table';
+        }
+
+        function previousPage() {
+            if (currentPage > 1) {
+                currentPage--;
+                loadCustomers();
+            }
+        }
+
+        function nextPage() {
+            if (currentPage < totalPages) {
+                currentPage++;
+                loadCustomers();
+            }
+        }
+
+        // Add event listeners for real-time search
+        document.getElementById('search').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                currentPage = 1;
+                loadCustomers();
+            }
+        });
+
+        document.getElementById('city').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                currentPage = 1;
+                loadCustomers();
+            }
+        });
+
+        document.getElementById('gender').addEventListener('change', function() {
+            currentPage = 1;
+            loadCustomers();
+        });
+
+        document.getElementById('perPage').addEventListener('change', function() {
+            currentPage = 1;
+            loadCustomers();
+        });
+    </script>
+</body>
+</html>
