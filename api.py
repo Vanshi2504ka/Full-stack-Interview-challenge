@@ -462,4 +462,456 @@ def get_order_stats():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# Enhanced Order Management Endpoints
+
+@app.route('/api/orders/<int:order_id>', methods=['PUT'])
+def update_order_status(order_id):
+    """Update order status and timestamps"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        # Validate required fields
+        status = data.get('status')
+        if not status:
+            return jsonify({'error': 'Status is required'}), 400
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Check if order exists
+        cursor.execute("SELECT order_id FROM orders WHERE order_id = ?", [order_id])
+        if not cursor.fetchone():
+            conn.close()
+            return jsonify({'error': 'Order not found'}), 404
+        
+        # Build update query based on status
+        update_fields = []
+        params = []
+        
+        update_fields.append("status = ?")
+        params.append(status)
+        
+        # Update timestamps based on status
+        current_time = datetime.now().isoformat()
+        
+        if status == 'Shipped':
+            update_fields.append("shipped_at = ?")
+            params.append(current_time)
+        elif status == 'Delivered':
+            update_fields.append("delivered_at = ?")
+            params.append(current_time)
+        elif status == 'Returned':
+            update_fields.append("returned_at = ?")
+            params.append(current_time)
+        
+        # Add any additional fields
+        if 'num_of_item' in data:
+            update_fields.append("num_of_item = ?")
+            params.append(data['num_of_item'])
+        
+        # Execute update
+        update_query = f"UPDATE orders SET {', '.join(update_fields)} WHERE order_id = ?"
+        params.append(order_id)
+        cursor.execute(update_query, params)
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'message': f'Order {order_id} updated successfully',
+            'order_id': order_id,
+            'status': status
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/customers/<int:customer_id>/orders', methods=['GET'])
+def get_customer_orders(customer_id):
+    """Get all orders for a specific customer with detailed analytics"""
+    try:
+        # Get query parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 20, type=int), 100)
+        status = request.args.get('status')
+        sort_by = request.args.get('sort_by', 'created_at')
+        sort_order = request.args.get('sort_order', 'DESC')
+        
+        offset = (page - 1) * per_page
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Validate customer exists
+        cursor.execute("SELECT id, first_name, last_name FROM users WHERE id = ?", [customer_id])
+        customer = cursor.fetchone()
+        if not customer:
+            conn.close()
+            return jsonify({'error': 'Customer not found'}), 404
+        
+        # Build WHERE clause
+        where_conditions = ["user_id = ?"]
+        params = [customer_id]
+        
+        if status:
+            where_conditions.append("status = ?")
+            params.append(status)
+        
+        where_clause = " WHERE " + " AND ".join(where_conditions)
+        
+        # Get total count
+        count_query = f"SELECT COUNT(*) FROM orders{where_clause}"
+        cursor.execute(count_query, params)
+        total_count = cursor.fetchone()[0]
+        
+        # Validate sort parameters
+        allowed_sort_fields = ['created_at', 'status', 'num_of_item', 'delivered_at']
+        if sort_by not in allowed_sort_fields:
+            sort_by = 'created_at'
+        
+        if sort_order.upper() not in ['ASC', 'DESC']:
+            sort_order = 'DESC'
+        
+        # Get orders
+        query = f"""
+            SELECT order_id, user_id, status, gender, 
+                   created_at, returned_at, shipped_at, delivered_at, num_of_item
+            FROM orders{where_clause}
+            ORDER BY {sort_by} {sort_order}
+            LIMIT ? OFFSET ?
+        """
+        cursor.execute(query, params + [per_page, offset])
+        orders = cursor.fetchall()
+        
+        # Get customer order analytics
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_orders,
+                COUNT(CASE WHEN status = 'Delivered' THEN 1 END) as delivered_orders,
+                COUNT(CASE WHEN status = 'Cancelled' THEN 1 END) as cancelled_orders,
+                AVG(num_of_item) as avg_items_per_order,
+                SUM(num_of_item) as total_items_ordered
+            FROM orders 
+            WHERE user_id = ?
+        """, [customer_id])
+        
+        analytics = cursor.fetchone()
+        
+        # Convert to list of dictionaries
+        orders_list = []
+        for order in orders:
+            order_dict = dict(order)
+            # Convert datetime fields
+            for field in ['created_at', 'returned_at', 'shipped_at', 'delivered_at']:
+                order_dict[field] = order_dict[field] if order_dict[field] else None
+            orders_list.append(order_dict)
+        
+        conn.close()
+        
+        return jsonify({
+            'customer': {
+                'id': customer[0],
+                'name': f"{customer[1]} {customer[2]}"
+            },
+            'orders': orders_list,
+            'analytics': {
+                'total_orders': analytics[0],
+                'delivered_orders': analytics[1],
+                'cancelled_orders': analytics[2],
+                'avg_items_per_order': round(analytics[3], 2) if analytics[3] else 0,
+                'total_items_ordered': analytics[4] or 0,
+                'delivery_rate': round((analytics[1] / analytics[0]) * 100, 2) if analytics[0] > 0 else 0
+            },
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total_count,
+                'pages': (total_count + per_page - 1) // per_page
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/orders/bulk/status', methods=['PUT'])
+def bulk_update_order_status():
+    """Bulk update order statuses"""
+    try:
+        data = request.get_json()
+        if not data or 'orders' not in data:
+            return jsonify({'error': 'Orders data is required'}), 400
+        
+        orders_data = data['orders']
+        if not isinstance(orders_data, list):
+            return jsonify({'error': 'Orders must be a list'}), 400
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        updated_count = 0
+        errors = []
+        
+        for order_update in orders_data:
+            order_id = order_update.get('order_id')
+            status = order_update.get('status')
+            
+            if not order_id or not status:
+                errors.append(f"Order ID and status are required for each order")
+                continue
+            
+            try:
+                # Check if order exists
+                cursor.execute("SELECT order_id FROM orders WHERE order_id = ?", [order_id])
+                if not cursor.fetchone():
+                    errors.append(f"Order {order_id} not found")
+                    continue
+                
+                # Update order status
+                current_time = datetime.now().isoformat()
+                update_fields = ["status = ?"]
+                params = [status]
+                
+                if status == 'Shipped':
+                    update_fields.append("shipped_at = ?")
+                    params.append(current_time)
+                elif status == 'Delivered':
+                    update_fields.append("delivered_at = ?")
+                    params.append(current_time)
+                elif status == 'Returned':
+                    update_fields.append("returned_at = ?")
+                    params.append(current_time)
+                
+                update_query = f"UPDATE orders SET {', '.join(update_fields)} WHERE order_id = ?"
+                params.append(order_id)
+                cursor.execute(update_query, params)
+                updated_count += 1
+                
+            except Exception as e:
+                errors.append(f"Error updating order {order_id}: {str(e)}")
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'message': f'Bulk update completed',
+            'updated_count': updated_count,
+            'total_orders': len(orders_data),
+            'errors': errors if errors else None
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/orders/analytics/summary', methods=['GET'])
+def get_order_analytics_summary():
+    """Get comprehensive order analytics summary"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Overall order statistics
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_orders,
+                COUNT(CASE WHEN status = 'Delivered' THEN 1 END) as delivered,
+                COUNT(CASE WHEN status = 'Cancelled' THEN 1 END) as cancelled,
+                COUNT(CASE WHEN status = 'Shipped' THEN 1 END) as shipped,
+                COUNT(CASE WHEN status = 'Pending' THEN 1 END) as pending,
+                AVG(num_of_item) as avg_items,
+                SUM(num_of_item) as total_items
+            FROM orders
+        """)
+        
+        overall_stats = cursor.fetchone()
+        
+        # Monthly order trends
+        cursor.execute("""
+            SELECT 
+                strftime('%Y-%m', created_at) as month,
+                COUNT(*) as count,
+                AVG(num_of_item) as avg_items
+            FROM orders 
+            WHERE created_at IS NOT NULL
+            GROUP BY month
+            ORDER BY month DESC
+            LIMIT 12
+        """)
+        
+        monthly_trends = [dict(row) for row in cursor.fetchall()]
+        
+        # Top customers by order count
+        cursor.execute("""
+            SELECT 
+                u.id, u.first_name, u.last_name, u.email,
+                COUNT(o.order_id) as order_count,
+                SUM(o.num_of_item) as total_items,
+                AVG(o.num_of_item) as avg_items_per_order
+            FROM users u
+            JOIN orders o ON u.id = o.user_id
+            GROUP BY u.id, u.first_name, u.last_name, u.email
+            ORDER BY order_count DESC
+            LIMIT 10
+        """)
+        
+        top_customers = [dict(row) for row in cursor.fetchall()]
+        
+        # Order status timeline analysis
+        cursor.execute("""
+            SELECT 
+                status,
+                AVG(JULIANDAY(delivered_at) - JULIANDAY(created_at)) as avg_delivery_days,
+                MIN(JULIANDAY(delivered_at) - JULIANDAY(created_at)) as min_delivery_days,
+                MAX(JULIANDAY(delivered_at) - JULIANDAY(created_at)) as max_delivery_days
+            FROM orders 
+            WHERE status = 'Delivered' 
+                AND created_at IS NOT NULL 
+                AND delivered_at IS NOT NULL
+        """)
+        
+        delivery_timeline = cursor.fetchone()
+        
+        # City-wise order distribution
+        cursor.execute("""
+            SELECT 
+                u.city,
+                COUNT(o.order_id) as order_count,
+                AVG(o.num_of_item) as avg_items,
+                COUNT(CASE WHEN o.status = 'Delivered' THEN 1 END) as delivered_count
+            FROM users u
+            JOIN orders o ON u.id = o.user_id
+            GROUP BY u.city
+            HAVING order_count > 5
+            ORDER BY order_count DESC
+            LIMIT 15
+        """)
+        
+        city_distribution = [dict(row) for row in cursor.fetchall()]
+        
+        conn.close()
+        
+        return jsonify({
+            'overall_statistics': {
+                'total_orders': overall_stats[0],
+                'delivered_orders': overall_stats[1],
+                'cancelled_orders': overall_stats[2],
+                'shipped_orders': overall_stats[3],
+                'pending_orders': overall_stats[4],
+                'avg_items_per_order': round(overall_stats[5], 2) if overall_stats[5] else 0,
+                'total_items_ordered': overall_stats[6] or 0,
+                'delivery_rate': round((overall_stats[1] / overall_stats[0]) * 100, 2) if overall_stats[0] > 0 else 0
+            },
+            'monthly_trends': monthly_trends,
+            'top_customers': top_customers,
+            'delivery_timeline': {
+                'avg_delivery_days': round(delivery_timeline[1], 1) if delivery_timeline and delivery_timeline[1] else None,
+                'min_delivery_days': round(delivery_timeline[2], 1) if delivery_timeline and delivery_timeline[2] else None,
+                'max_delivery_days': round(delivery_timeline[3], 1) if delivery_timeline and delivery_timeline[3] else None
+            },
+            'city_distribution': city_distribution
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/customers/<int:customer_id>/order-history', methods=['GET'])
+def get_customer_order_history(customer_id):
+    """Get detailed order history for a customer with timeline"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Validate customer exists
+        cursor.execute("""
+            SELECT id, first_name, last_name, email, city, created_at
+            FROM users WHERE id = ?
+        """, [customer_id])
+        
+        customer = cursor.fetchone()
+        if not customer:
+            conn.close()
+            return jsonify({'error': 'Customer not found'}), 404
+        
+        # Get complete order history
+        cursor.execute("""
+            SELECT 
+                order_id, status, num_of_item,
+                created_at, shipped_at, delivered_at, returned_at,
+                JULIANDAY(delivered_at) - JULIANDAY(created_at) as delivery_days
+            FROM orders 
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+        """, [customer_id])
+        
+        orders = cursor.fetchall()
+        
+        # Calculate customer lifetime metrics
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_orders,
+                COUNT(CASE WHEN status = 'Delivered' THEN 1 END) as successful_orders,
+                COUNT(CASE WHEN status = 'Cancelled' THEN 1 END) as cancelled_orders,
+                AVG(num_of_item) as avg_order_size,
+                SUM(num_of_item) as total_items_ordered,
+                MIN(created_at) as first_order_date,
+                MAX(created_at) as last_order_date,
+                AVG(JULIANDAY(delivered_at) - JULIANDAY(created_at)) as avg_delivery_time
+            FROM orders 
+            WHERE user_id = ?
+        """, [customer_id])
+        
+        metrics = cursor.fetchone()
+        
+        # Get order status timeline
+        cursor.execute("""
+            SELECT 
+                strftime('%Y-%m', created_at) as month,
+                status,
+                COUNT(*) as count
+            FROM orders 
+            WHERE user_id = ?
+            GROUP BY month, status
+            ORDER BY month DESC, status
+        """, [customer_id])
+        
+        timeline = [dict(row) for row in cursor.fetchall()]
+        
+        conn.close()
+        
+        # Convert orders to list of dictionaries
+        orders_list = []
+        for order in orders:
+            order_dict = dict(order)
+            # Convert datetime fields
+            for field in ['created_at', 'shipped_at', 'delivered_at', 'returned_at']:
+                order_dict[field] = order_dict[field] if order_dict[field] else None
+            orders_list.append(order_dict)
+        
+        return jsonify({
+            'customer': {
+                'id': customer[0],
+                'name': f"{customer[1]} {customer[2]}",
+                'email': customer[3],
+                'city': customer[4],
+                'member_since': customer[5]
+            },
+            'order_history': orders_list,
+            'customer_metrics': {
+                'total_orders': metrics[0],
+                'successful_orders': metrics[1],
+                'cancelled_orders': metrics[2],
+                'avg_order_size': round(metrics[3], 2) if metrics[3] else 0,
+                'total_items_ordered': metrics[4] or 0,
+                'first_order_date': metrics[5],
+                'last_order_date': metrics[6],
+                'avg_delivery_time_days': round(metrics[7], 1) if metrics[7] else None,
+                'success_rate': round((metrics[1] / metrics[0]) * 100, 2) if metrics[0] > 0 else 0
+            },
+            'order_timeline': timeline
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # Search endpoint
